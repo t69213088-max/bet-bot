@@ -1,0 +1,49 @@
+name: signal-bot
+
+on:
+  schedule:
+    - cron: "0 * * * *"
+  workflow_dispatch:
+
+concurrency:
+  group: signal-bot
+  cancel-in-progress: false
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    timeout-minutes: 358
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - run: pip install -r requirements.txt
+
+      - name: Restore state
+        uses: actions/cache/restore@v4
+        with:
+          path: |
+            bot_state.json
+            signals.csv
+          key: bot-state-${{ github.run_id }}
+          restore-keys: bot-state-
+
+      - name: Run bot
+        run: python signal_bot.py
+        env:
+          API_KEY: ${{ secrets.API_KEY }}
+          TG_TOKEN: ${{ secrets.TG_TOKEN }}
+          TG_CHAT_ID: ${{ secrets.TG_CHAT_ID }}
+          RUN_MINUTES: "350"
+
+      - name: Save state
+        if: always()
+        uses: actions/cache/save@v4
+        with:
+          path: |
+            bot_state.json
+            signals.csv
+          key: bot-state-${{ github.run_id }}
