@@ -27,9 +27,9 @@ import requests
 
 # ============ ДОСТУПЫ: ТОЛЬКО через переменные окружения / GitHub Secrets ============
 # Никогда не вписывайте ключи прямо в код, если репозиторий публичный.
-API_KEY = os.getenv("API_KEY", "")
-TG_TOKEN = os.getenv("TG_TOKEN", "")
-TG_CHAT_ID = os.getenv("TG_CHAT_ID", "")
+API_KEY = os.getenv("API_KEY", "").strip()
+TG_TOKEN = os.getenv("TG_TOKEN", "").strip()
+TG_CHAT_ID = os.getenv("TG_CHAT_ID", "").strip()
 
 # ============ ВИДЫ СПОРТА ============
 # on: включён ли, every: период опроса в секундах.
