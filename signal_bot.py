@@ -3,7 +3,7 @@
 
 ФУТБОЛ:  ТБ, ТБ 1-го тайма, Обе забьют, Угловые ТБ, ЖК ТБ, ИТБ команды, Удаление
 ДРУГИЕ:  баскетбол, NBA, хоккей, гандбол, волейбол, бейсбол, регби, NFL, AFL
-         (тоталы по темпу, близкая концовка; волейбол: равные сеты)
+         (тоталы по темпу В ПЕРЕРЫВЕ, близкая концовка; волейбол: равные сеты)
 
 Что умеет сверх сигналов:
   * журнал всех сигналов в signals.csv
@@ -26,25 +26,26 @@ from datetime import datetime, timezone
 import requests
 
 # ============ ДОСТУПЫ: ТОЛЬКО через переменные окружения / GitHub Secrets ============
-# Никогда не вписывайте ключи прямо в код, если репозиторий публичный.
-API_KEY = os.getenv("API_KEY", "").strip()
-TG_TOKEN = os.getenv("TG_TOKEN", "").strip()
-TG_CHAT_ID = os.getenv("TG_CHAT_ID", "").strip()
+API_KEY = os.getenv("API_KEY", "")
+TG_TOKEN = os.getenv("TG_TOKEN", "")
+TG_CHAT_ID = os.getenv("TG_CHAT_ID", "")
 
 # ============ ВИДЫ СПОРТА ============
 # on: включён ли, every: период опроса в секундах.
 # Каждый спорт = отдельный API со своей квотой (на Free 100 запросов/сутки на каждый).
+# При опросе раз в 300 сек квоты хватает примерно на 8 часов в сутки.
+# Включайте только то, что вам нужно. Футбол на Free-тарифе быстро выедает квоту.
 SPORTS = {
-    "football":   {"on": True, "every": 90},
-    "basketball": {"on": True, "every": 120},
-    "nba":        {"on": True, "every": 120},
-    "hockey":     {"on": True, "every": 120},
-    "handball":   {"on": True, "every": 120},
-    "volleyball": {"on": True, "every": 120},
-    "baseball":   {"on": True, "every": 180},
-    "rugby":      {"on": True, "every": 180},
-    "nfl":        {"on": True, "every": 180},
-    "afl":        {"on": True, "every": 180},
+    "football":   {"on": False, "every": 90},
+    "basketball": {"on": True,  "every": 300},
+    "nba":        {"on": True,  "every": 300},
+    "hockey":     {"on": True,  "every": 300},
+    "handball":   {"on": False, "every": 120},
+    "volleyball": {"on": False, "every": 120},
+    "baseball":   {"on": False, "every": 180},
+    "rugby":      {"on": False, "every": 180},
+    "nfl":        {"on": False, "every": 180},
+    "afl":        {"on": False, "every": 180},
 }
 HOSTS = {
     "football": "v3.football.api-sports.io",
@@ -93,6 +94,8 @@ TOTALS = {
     "nfl":        dict(periods=4, over=55, under=36, min_period=2, close=7),
     "afl":        dict(periods=4, over=190, under=140, min_period=2, close=12),
 }
+# Виды спорта, где прогноз тотала считается ТОЛЬКО в перерыве (ровно половина игры)
+HALF_SPORTS = {"basketball", "nba", "handball", "rugby", "nfl", "afl"}
 
 # ============ СЛУЖЕБНОЕ ============
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -292,7 +295,8 @@ def analyse_football(fx):
         return
 
     def emit(kind, text, t=None, **ev):
-        meta = dict(sport="football", match=f"{home} — {away}", kind=LABEL.get(t, "Удаление" if kind.startswith("red") else kind),
+        meta = dict(sport="football", match=f"{home} — {away}",
+                    kind=LABEL.get(t, "Удаление" if kind.startswith("red") else kind),
                     minute=f"{minute}'", score=f"{gh}:{ga}")
         fire(("football", fid, kind), head + text, meta, (t, ev) if t else None)
 
@@ -467,6 +471,12 @@ def progress(g, total_periods):
     return (cur - 0.5) / total_periods, cur
 
 
+def is_halftime(g):
+    """Перерыв: в API-Sports это short == 'HT' или флаг halftime (NBA)."""
+    st = g.get("status") or {}
+    return str(st.get("short") or "").upper() == "HT" or st.get("halftime") is True
+
+
 def analyse_totals(sport, g):
     cfg = TOTALS[sport]
     pr = progress(g, cfg["periods"])
@@ -478,7 +488,6 @@ def analyse_totals(sport, g):
     home, away, sh, sa = sides(g)
     ph, pa = pts(sh), pts(sa)
     total, gid = ph + pa, g.get("id")
-    proj = round(total / frac)
     head = (f"{ICON[sport]} <b>{home} — {away}</b>\n{league_of(g)} | "
             f"период {cur}/{cfg['periods']} | счёт {ph}:{pa}\n")
 
@@ -487,12 +496,19 @@ def analyse_totals(sport, g):
                     minute=f"период {cur}", score=f"{ph}:{pa}")
         fire((sport, gid, kind), head + text, meta)
 
-    if proj >= cfg["over"]:
-        emit("over", "🔥 <b>ТБ</b>: высокий темп\n"
-             f"Прогноз тотала ≈ {proj} (порог {cfg['over']}). Берите ТБ, если линия заметно ниже.", "ТБ")
-    elif proj <= cfg["under"] and total > 0:
-        emit("under", "🧊 <b>ТМ</b>: низкий темп\n"
-             f"Прогноз тотала ≈ {proj} (порог {cfg['under']}). Берите ТМ, если линия заметно выше.", "ТМ")
+    # Прогноз тотала: только в перерыве, когда сыграна ровно половина игры.
+    # Один сигнал на матч (ключ "total"), поэтому ТМ и ТБ подряд больше не приходят.
+    if sport in HALF_SPORTS and is_halftime(g) and total > 0:
+        proj = total * 2
+        if proj >= cfg["over"]:
+            emit("total", "🔥 <b>ТБ</b>: высокий темп\n"
+                 f"Прогноз тотала ≈ {proj} (порог {cfg['over']}). "
+                 "Берите ТБ, если линия заметно ниже.", "ТБ")
+        elif proj <= cfg["under"]:
+            emit("total", "🧊 <b>ТМ</b>: низкий темп\n"
+                 f"Прогноз тотала ≈ {proj} (порог {cfg['under']}). "
+                 "Берите ТМ, если линия заметно выше.", "ТМ")
+
     if cur >= cfg.get("close_from", cfg["periods"]) and abs(ph - pa) <= cfg["close"]:
         emit("close", "⚔️ <b>Близкая концовка</b>\n"
              f"Разница {abs(ph - pa)}: ждите борьбы до конца (ТБ/овертайм/фора).", "Концовка")
